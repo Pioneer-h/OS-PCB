@@ -4,7 +4,7 @@
 #include <time.h>
 
 #define N 10
-#define MAX_ORDER 10
+#define MAX_ORDER 200
 
 /*
  * PCB 结构体（Process Control Block，进程控制块）
@@ -148,7 +148,8 @@ void print_result(char *name, struct pcb p[], int count, char order[][10], int o
 {
     int i;
     printf("\n%s\n", name);
-    printf("id  arrive burst start finish turn weight priority\n");
+    printf("%-3s %6s %6s %6s %6s %5s %7s %8s\n",
+           "id", "arrive", "burst", "start", "finish", "turn", "weight", "priority");
     for (i = 0; i < count; i++)
     {
         int turn = p[i].finish - p[i].arrive;     // 周转时间 = 完成 - 到达
@@ -157,7 +158,7 @@ void print_result(char *name, struct pcb p[], int count, char order[][10], int o
         {
             weight = (float)turn / p[i].burst;     // 带权周转时间
         }
-        printf("%s   %d     %d    %d    %d    %d   %.2f     %d\n",
+        printf("%-3s %6d %6d %6d %6d %5d %7.2f %8d\n",
                p[i].id,
                p[i].arrive,
                p[i].burst,
@@ -185,11 +186,12 @@ void print_process_list(struct pcb p[], int count)
 {
     int i;
     printf("\nprocess list:\n");
-    printf("id  arrive burst priority\n");
+    printf("%-3s %6s %6s %8s\n", "id", "arrive", "burst", "priority");
     for (i = 0; i < count; i++)
     {
-        printf("%s   %d     %d    %d\n", p[i].id, p[i].arrive, p[i].burst, p[i].priority);
+        printf("%-3s %6d %6d %8d\n", p[i].id, p[i].arrive, p[i].burst, p[i].priority);
     }
+    printf("\n");
 }
 
 /*
