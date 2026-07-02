@@ -1,884 +1,642 @@
 #include <stdio.h>
-#include <string.h>
 #include <stdlib.h>
+#include <string.h>
 #include <time.h>
 
-#define N 10
-#define MAX_ORDER 200
+#define MAX_PROC 100                 // 最大进程数量限制
 
 /*
- * PCB 结构体（Process Control Block，进程控制块）
- * 
- * 这是整个程序的核心数据结构，每个进程都有这样一个"信息卡片"，
- * 记录了进程的所有信息，操作系统就是靠这些信息来调度进程的。
- * 
- * 字段说明：
- *   id       - 进程名称，如 "P1", "P2"（字符串）
- *   arrive   - 到达时间：进程什么时候进入系统（越小越早到）
- *   burst    - 运行时间：进程需要运行多久才能完成（也叫"服务时间"）
- *   priority - 优先级：数字越小优先级越高（用于 MLFQ 调度）
- *   start    - 开始运行时间：进程第一次被 CPU 执行的时间点（初始 -1 表示未开始）
- *   finish   - 完成时间：进程运行结束的时间点
- *   remain   - 剩余运行时间：进程还剩多少时间没跑完（初始 = burst）
- *   wait     - 等待时间：进程在就绪队列中等待的总时间
- *   level    - 队列级别：用于 MLFQ 多级反馈队列（0最高优先级，2最低）
+ * PCB 进程控制块（Process Control Block）
+ * 操作系统中每个进程都有这样一个数据结构，记录进程的所有信息
  */
-struct pcb
-{
-    char id[10];
-    int arrive;
-    int burst;
-    int priority;
-    int start;
-    int finish;
-    int remain;
-    int wait;
-    int level;
+struct PCB {
+    char name[10];                   // 进程名称（如 P1, P2）
+    int arriveTime;                  // 到达时间 - 进程什么时候进入系统
+    int burstTime;                   // 运行时间 - 需要在CPU上运行多久才能完成
+    int remainTime;                  // 剩余时间 - 还剩多久没运行完
+    int priority;                    // 优先权 - 数值越小优先级越高
+    int startTime;                  // 开始时间 - 第一次被CPU调度的时间点
+    int finishTime;                 // 完成时间 - 进程运行结束的时间点
+    int turnaroundTime;             // 周转时间 = 完成时间 - 到达时间，表示进程在系统中停留了多久
+    float weightedTaTime;           // 带权周转时间 = 周转时间 / 运行时间，反映调度质量
+    struct PCB *next;               // 链表指针 - 指向下一个进程，用于就绪队列
 };
 
-void save_data(struct pcb p[], int count);
-int load_data(struct pcb p[]);
+struct PCB backupArray[MAX_PROC];  // 备份数组 - 保存所有进程原始数据，每次调度都从这里复制
+int backupCount = 0;               // 当前保存的进程总数
+int activeFlag[MAX_PROC];         // 标记进程是否已经入队（0=未入队，1=已入队）
+int currentTime = 0;               // 当前系统时间，模拟调度过程中的时钟推进
 
 /*
- * 初始化默认进程（硬编码 5 个示例进程）
- * 
- * 当 processes.txt 文件不存在时，用这 5 个默认进程来演示。
- * 你可以修改这些数值来测试不同的调度场景。
+ * 初始化系统 - 将所有备份数组清零
+ * 程序启动时调用一次，确保所有数据从干净状态开始
  */
-void init_processes(struct pcb p[])
-{
-    strcpy(p[0].id, "P1");
-    p[0].arrive = 0;
-    p[0].burst = 5;
-    p[0].priority = 3;
-
-    strcpy(p[1].id, "P2");
-    p[1].arrive = 2;
-    p[1].burst = 2;
-    p[1].priority = 5;
-
-    strcpy(p[2].id, "P3");
-    p[2].arrive = 4;
-    p[2].burst = 3;
-    p[2].priority = 1;
-
-    strcpy(p[3].id, "P4");
-    p[3].arrive = 5;
-    p[3].burst = 4;
-    p[3].priority = 4;
-
-    strcpy(p[4].id, "P5");
-    p[4].arrive = 6;
-    p[4].burst = 1;
-    p[4].priority = 2;
-}
-
-/*
- * 重置进程状态（每次运行调度算法之前调用）
- * 
- * 把进程的"运行时状态"字段恢复为初始值，这样每次调度都是独立运行的。
- * 相当于"洗牌重来"，确保不同调度算法之间互不影响。
- */
-void reset_processes(struct pcb p[], int count)
-{
+void initSystem(void) {
     int i;
-    for (i = 0; i < count; i++)
-    {
-        p[i].start = -1;             // -1 表示"还没开始运行"
-        p[i].finish = -1;            // -1 表示"还没完成"
-        p[i].remain = p[i].burst;    // 剩余运行时间 = 原始运行时间
-        p[i].wait = 0;               // 等待时间清零
-        p[i].level = 0;              // 队列级别归零（MLFQ 从最高级开始）
+    for (i = 0; i < MAX_PROC; i++) {
+        strcpy(backupArray[i].name, "");
+        backupArray[i].arriveTime = 0;
+        backupArray[i].burstTime = 0;
+        backupArray[i].remainTime = 0;
+        backupArray[i].priority = 0;
+        backupArray[i].startTime = -1;        // -1 表示尚未开始运行
+        backupArray[i].finishTime = -1;       // -1 表示尚未完成
+        backupArray[i].turnaroundTime = 0;
+        backupArray[i].weightedTaTime = 0.0f;
+        backupArray[i].next = NULL;
+        activeFlag[i] = 0;                    // 0 表示还没有入队
     }
+    backupCount = 0;
+    currentTime = 0;
 }
 
 /*
- * 复制进程数组（深拷贝每个结构体）
- * 
- * 调度算法会修改进程数据（start, finish, remain 等），
- * 所以需要先复制一份副本，在副本上操作，保护原始数据不被修改。
- * 参数：
- *   from[]  - 源数组
- *   to[]    - 目标数组
- *   count   - 进程数量
+ * 按到达时间升序排序 - 冒泡排序
+ * 调度前必须排序，确保进程按到达顺序处理
  */
-void copy_processes(struct pcb from[], struct pcb to[], int count)
-{
-    int i;
-    for (i = 0; i < count; i++)
-    {
-        to[i] = from[i];  // C 语言中结构体可以直接整体赋值，相当于逐字段复制
-    }
-}
-
-/*
- * 按到达时间从小到大排序（插入排序算法）
- * 
- * 排序后，数组中的进程按 arrive 升序排列，
- * 方便后续调度算法按到达顺序处理。
- * 使用插入排序，因为进程数量少（N=10），简单高效。
- */
-void sort_by_arrive(struct pcb p[], int count)
-{
+void sortBackup(void) {
     int i, j;
-    for (i = 1; i < count; i++)              // 从第二个元素开始，逐个插入
-    {
-        struct pcb temp = p[i];               // 暂存当前要插入的元素
-        j = i - 1;
-        // 在已排序部分中，从后往前找插入位置
-        // 如果前面的元素到达时间更大，就把它往后移一位
-        while (j >= 0 && p[j].arrive > temp.arrive)
-        {
-            p[j + 1] = p[j];                  // 后移
-            j--;
+    // 冒泡排序：双重循环比较相邻元素
+    for (i = 0; i < backupCount; i++) {
+        for (j = i+1; j < backupCount; j++) {
+            // 如果后面的进程到达时间更早，交换位置
+            if (backupArray[j].arriveTime < backupArray[i].arriveTime) {
+                struct PCB temp = backupArray[i];   // 用临时变量保存
+                backupArray[i] = backupArray[j];
+                backupArray[j] = temp;
+            }
         }
-        p[j + 1] = temp;                      // 放入正确位置
     }
 }
-
-/*
- * 打印调度结果（表格形式）
- * 
- * 输出每个进程的调度结果，包括：
- *   - turn（周转时间）= 完成时间 - 到达时间（从到达到完成的总时间）
- *   - weight（带权周转时间）= 周转时间 / 运行时间（越小越好，>=1）
- * 最后还打印执行顺序，展示进程被调度的先后次序。
- */
-void print_result(char *name, struct pcb p[], int count, char order[][10], int order_count)
-{
-    int i;
-    printf("\n%s\n", name);
-    printf("%-3s %6s %6s %6s %6s %5s %7s %8s\n",
-           "id", "arrive", "burst", "start", "finish", "turn", "weight", "priority");
-    for (i = 0; i < count; i++)
-    {
-        int turn = p[i].finish - p[i].arrive;     // 周转时间 = 完成 - 到达
-        float weight = 0.0;
-        if (p[i].burst != 0)                       // 防止除零错误
-        {
-            weight = (float)turn / p[i].burst;     // 带权周转时间
-        }
-        printf("%-3s %6d %6d %6d %6d %5d %7.2f %8d\n",
-               p[i].id,
-               p[i].arrive,
-               p[i].burst,
-               p[i].start,
-               p[i].finish,
-               turn,
-               weight,
-               p[i].priority);
-    }
-    printf("order: ");
-    for (i = 0; i < order_count; i++)
-    {
-        printf("%s ", order[i]);                   // 打印执行顺序，如 "P1 P2 P3 P4 P5"
-    }
-    printf("\n");
-}
-
-/*
- * 打印当前进程列表（菜单选项 1 调用）
- * 
- * 只显示进程的基本属性：名称、到达时间、运行时间、优先级。
- * 不包含运行时状态（start, finish 等），因为这些在调度前是未知的。
- */
-void print_process_list(struct pcb p[], int count)
-{
-    int i;
-    printf("\nprocess list:\n");
-    printf("%-3s %6s %6s %8s\n", "id", "arrive", "burst", "priority");
-    for (i = 0; i < count; i++)
-    {
-        printf("%-3s %6d %6d %8d\n", p[i].id, p[i].arrive, p[i].burst, p[i].priority);
-    }
-    printf("\n");
-}
-
 /*
  * 从文件加载进程数据
- * 
- * 程序启动时调用，读取 processes.txt 文件中的进程数据。
- * 加载逻辑：
- *   1. 先尝试从 ../data/processes.txt 加载（相对路径）
- *   2. 如果失败，尝试从当前目录的 processes.txt 加载
- *   3. 如果都失败，调用 init_processes() 使用默认数据并保存到文件
- *   4. 如果文件内容为空（count==0），也使用默认数据
- * 
- * 返回值：进程数量
+ * 格式：第一行是进程数量，之后每行：名称 到达时间 运行时间 优先权
+ * 返回 1 表示加载成功，0 表示失败
  */
-int load_data(struct pcb p[])
-{
-    FILE *fp;
-    int count = 0;
+int load_data(void) {
+    FILE *fp = fopen("processes.txt", "r");   // 以只读方式打开文件
+    if (fp == NULL) return 0;                 // 文件不存在则返回失败（0）
+    // 读取第一行：进程总数
+    if (fscanf(fp, "%d", &backupCount) != 1) { fclose(fp); return 0; }
+    // 检查数量是否合法（0~MAX_PROC之间）
+    if (backupCount <= 0 || backupCount > MAX_PROC) { fclose(fp); return 0; }
     int i;
-    char file_name[20] = "processes.txt";
-
-    fp = fopen("../data/processes.txt", "r");  // 尝试路径1
-    if (fp == NULL)
-    {
-        fp = fopen(file_name, "r");             // 尝试路径2：当前目录
+    for (i = 0; i < backupCount; i++) {
+        char id[10]; int arr, bst, prio;
+        // 每行读取：名称 到达时间 运行时间 优先权
+        if (fscanf(fp, "%s %d %d %d", id, &arr, &bst, &prio) != 4) break;
+        // 把读取到的数据填入备份数组
+        strcpy(backupArray[i].name, id);
+        backupArray[i].arriveTime = arr;
+        backupArray[i].burstTime = bst;
+        backupArray[i].priority = prio;
+        backupArray[i].remainTime = bst;       // 初始剩余时间 = 运行时间
+        backupArray[i].startTime = -1;         // -1 表示还没有开始运行
+        backupArray[i].finishTime = -1;        // -1 表示还没有完成
+        backupArray[i].turnaroundTime = 0;     // 初始周转时间 = 0
+        backupArray[i].weightedTaTime = 0.0f;  // 初始带权周转时间 = 0
+        backupArray[i].next = NULL;            // 链表指针初始为空
     }
-
-    if (fp == NULL)                             // 两个路径都失败，文件不存在
-    {
-        init_processes(p);                      // 使用默认的 5 个进程
-        save_data(p, 5);                        // 保存到文件，下次启动就能加载了
-        return 5;
-    }
-
-    // 文件存在，读取数据
-    fscanf(fp, "%d", &count);                   // 第一行：进程数量
-    for (i = 0; i < count && i < N; i++)        // 最多读 N 个进程
-    {
-        fscanf(fp, "%s %d %d %d",               // 格式：名称 到达时间 运行时间 优先级
-               p[i].id, &p[i].arrive, &p[i].burst, &p[i].priority);
-    }
-    fclose(fp);
-
-    if (count == 0)                             // 文件内容为空
-    {
-        init_processes(p);
-        count = 5;
-        save_data(p, count);
-    }
-
-    return count;
+    fclose(fp);                                // 关闭文件
+    sortBackup();                              // 加载后按到达时间排序
+    return 1;                                  // 返回1表示加载成功
 }
 
 /*
  * 保存进程数据到文件
- * 
- * 把当前的进程列表写入 processes.txt，下次启动时会自动加载。
- * 保存格式：
- *   第一行：进程数量
- *   后续每行：进程名称 到达时间 运行时间 优先级
- * 保存逻辑与 load_data 对应，先尝试 ../data/ 路径，再尝试当前目录。
+ * 每次修改进程数据后自动保存，确保数据持久化
  */
-void save_data(struct pcb p[], int count)
-{
-    FILE *fp;
+void save_data(void) {
+    FILE *fp = fopen("processes.txt", "w");   // 以写方式打开（会覆盖原有内容）
+    if (fp == NULL) { printf("保存失败！\n"); return; }
+    fprintf(fp, "%d\n", backupCount);         // 第一行写入进程数量
     int i;
-    char file_name[20] = "processes.txt";
-
-    fp = fopen("../data/processes.txt", "w");   // 尝试路径1（写模式）
-    if (fp == NULL)
-    {
-        fp = fopen(file_name, "w");              // 尝试路径2：当前目录
-    }
-
-    if (fp == NULL)                              // 两个路径都打不开（如权限问题）
-    {
-        printf("can not save file\n");
-        return;
-    }
-
-    fprintf(fp, "%d\n", count);                  // 第一行写进程数量
-    for (i = 0; i < count; i++)
-    {
-        fprintf(fp, "%s %d %d %d\n",             // 每行写一个进程的四个属性
-                p[i].id, p[i].arrive, p[i].burst, p[i].priority);
-    }
-    fclose(fp);
+    // 逐行写入每个进程的4个属性
+    for (i = 0; i < backupCount; i++)
+        fprintf(fp, "%s %d %d %d\n", 
+                backupArray[i].name,          // 进程名称
+                backupArray[i].arriveTime,    // 到达时间
+                backupArray[i].burstTime,     // 运行时间
+                backupArray[i].priority);     // 优先权
+    fclose(fp);                               // 关闭文件
+    printf("已保存到 processes.txt\n");
 }
 
 /*
- * 手动添加进程（菜单选项 6 调用）
- * 
- * 用户通过键盘输入进程的属性，添加到进程列表末尾。
- * 注意 count 是指针传递（int *count），因为需要修改外部变量的值。
- * 添加后会自动保存到文件。
+ * 初始化默认进程 - 5 个示例进程，方便快速测试
+ * 当 processes.txt 不存在时自动使用
  */
-void add_process(struct pcb p[], int *count)
-{
-    char id[10];
-    int arrive;
-    int burst;
-    int priority;
+void init_default_processes(void) {
+    // 逐行初始化5个示例进程，方便快速测试
+    // 格式：名称 到达时间 运行时间 优先权
+    strcpy(backupArray[0].name, "P1"); backupArray[0].arriveTime=0; backupArray[0].burstTime=5; backupArray[0].priority=3;
+    strcpy(backupArray[1].name, "P2"); backupArray[1].arriveTime=2; backupArray[1].burstTime=2; backupArray[1].priority=5;
+    strcpy(backupArray[2].name, "P3"); backupArray[2].arriveTime=4; backupArray[2].burstTime=3; backupArray[2].priority=1;
+    strcpy(backupArray[3].name, "P4"); backupArray[3].arriveTime=5; backupArray[3].burstTime=4; backupArray[3].priority=4;
+    strcpy(backupArray[4].name, "P5"); backupArray[4].arriveTime=6; backupArray[4].burstTime=1; backupArray[4].priority=2;
+    backupCount = 5;          // 设置进程总数为5
+    sortBackup();             // 按到达时间排序
+    save_data();              // 保存到文件，下次启动可以直接加载
+}
 
-    printf("input process id: ");        // 输入进程名称，如 "P6"
-    scanf("%s", id);
-    printf("input arrive time: ");       // 输入到达时间
-    scanf("%d", &arrive);
-    printf("input burst time: ");        // 输入运行时间
-    scanf("%d", &burst);
-    printf("input priority: ");          // 输入优先级（数字越小优先级越高）
-    scanf("%d", &priority);
-
-    if (*count < N)                      // N=10，最多10个进程
-    {
-        strcpy(p[*count].id, id);        // 把新进程放到数组末尾
-        p[*count].arrive = arrive;
-        p[*count].burst = burst;
-        p[*count].priority = priority;
-        *count = *count + 1;             // 进程总数 +1（通过指针修改外部变量）
-        printf("process added\n");
+/*
+ * 用户手动输入所有进程
+ * 用户依次输入每个进程的名称、到达时间、运行时间、优先权
+ */
+void inputProcesses(void) {
+    int i;
+    printf("\n请输入进程数量: ");
+    scanf("%d", &backupCount);              // 用户输入进程总数
+    if (backupCount <= 0 || backupCount > MAX_PROC) { printf("无效的进程数量！\n"); backupCount=0; return; }
+    for (i = 0; i < backupCount; i++) {
+        // 输入每个进程的4个属性
+        printf("进程 %d: 名称 到达时间 运行时间 优先权 ", i+1);
+        scanf("%s %d %d %d", backupArray[i].name, &backupArray[i].arriveTime, &backupArray[i].burstTime, &backupArray[i].priority);
+        backupArray[i].remainTime = backupArray[i].burstTime;  // 初始剩余时间 = 总运行时间
+        backupArray[i].startTime = -1;       // 还未开始
+        backupArray[i].finishTime = -1;      // 还未完成
+        backupArray[i].turnaroundTime = 0;
+        backupArray[i].weightedTaTime = 0.0f;
+        backupArray[i].next = NULL;          // 链表指针初始为空
     }
-    else
-    {
-        printf("too many processes\n");  // 超过最大容量
+    sortBackup();     // 按到达时间排序，方便后续调度
+    save_data();      // 保存到文件
+    printf("完成！\n");
+}
+
+/*
+ * 添加单个进程 - 一次只添加一个，方便逐步增加
+ */
+void add_process(void) {
+    // 检查进程数量是否已满
+    if (backupCount >= MAX_PROC) { printf("进程已满\n"); return; }
+    // 提示用户输入进程信息
+    printf("输入进程名称: "); scanf("%s", backupArray[backupCount].name);
+    printf("输入到达时间: "); scanf("%d", &backupArray[backupCount].arriveTime);
+    printf("输入运行时间: "); scanf("%d", &backupArray[backupCount].burstTime);
+    printf("输入优先权: "); scanf("%d", &backupArray[backupCount].priority);
+    // 初始化所有运行时状态
+    backupArray[backupCount].remainTime = backupArray[backupCount].burstTime;
+    backupArray[backupCount].startTime = -1;
+    backupArray[backupCount].finishTime = -1;
+    backupArray[backupCount].turnaroundTime = 0;
+    backupArray[backupCount].weightedTaTime = 0.0f;
+    backupArray[backupCount].next = NULL;
+    backupCount++;             // 进程总数加1
+    sortBackup();              // 重新按到达时间排序
+    save_data();               // 保存到文件
+    printf("已添加。\n");
+}
+/*
+ * 显示当前所有进程列表
+ * 显示进程的基本信息：名称、到达时间、运行时间、优先权
+ */
+void show_process_list(void) {
+    int i;
+    if (backupCount <= 0) { printf("没有进程\n"); return; }  // 没有进程就不显示
+    printf("\n===== 进程列表 =====\n");
+    // 打印表头
+    printf("%-10s %-10s %-10s %-10s\n", "名称","到达","运行","优先权");
+    // 逐行打印每个进程的信息
+    for (i = 0; i < backupCount; i++)
+        printf("%-10s %-10d %-10d %-10d\n", 
+               backupArray[i].name,          // 进程名称
+               backupArray[i].arriveTime,    // 到达时间
+               backupArray[i].burstTime,     // 运行时间
+               backupArray[i].priority);     // 优先权
+    printf("\n");
+}
+/*
+ * 随机生成进程 - 全部随机生成，方便大量测试
+ * 到达时间：0~10，运行时间：1~8，优先权：1~5
+ */
+void random_generate(void) {
+    int n, i;
+    printf("生成多少个进程？ ");
+    scanf("%d", &n);
+    if (n <= 0 || n > MAX_PROC) { printf("无效数量！\n"); return; }
+    srand(time(NULL));          // 初始化随机种子，确保每次不同的随机结果
+    backupCount = n;
+    for (i = 0; i < n; i++) {
+        sprintf(backupArray[i].name, "P%d", i+1);          // 名称为 P1, P2, P3...
+        backupArray[i].arriveTime = rand() % 11;           // 到达时间 0~10
+        backupArray[i].burstTime = rand() % 8 + 1;         // 运行时间 1~8
+        backupArray[i].priority = rand() % 5 + 1;          // 优先权 1~5
+        backupArray[i].remainTime = backupArray[i].burstTime;
+        backupArray[i].startTime = -1;
+        backupArray[i].finishTime = -1;
+        backupArray[i].turnaroundTime = 0;
+        backupArray[i].weightedTaTime = 0.0f;
+        backupArray[i].next = NULL;
+    }
+    sortBackup();     // 按到达时间排序
+    save_data();      // 保存到文件
+    printf("随机生成完成！\n");
+    show_process_list();   // 显示生成的进程列表
+}
+
+/*
+ * 重置进程运行状态 - 每次调度算法运行前调用
+ * 把所有运行时的数据（开始时间、完成时间等）恢复初始状态
+ */
+void resetProcesses(void) {
+    int i;
+    for (i = 0; i < backupCount; i++) {
+        backupArray[i].startTime = -1;          // 重置为"未开始"
+        backupArray[i].finishTime = -1;         // 重置为"未完成"
+        backupArray[i].turnaroundTime = 0;
+        backupArray[i].weightedTaTime = 0.0f;
+        backupArray[i].remainTime = backupArray[i].burstTime;  // 恢复剩余时间
+        backupArray[i].next = NULL;            // 清除链表指针
     }
 }
 
 /*
- * 随机生成进程（菜单选项 7 调用）
- * 
- * 用户输入进程数量，程序自动生成随机数据：
- *   - 到达时间：0 ~ 10 之间的随机数
- *   - 运行时间：1 ~ 8  之间的随机数
- *   - 优先级：  1 ~ 5  之间的随机数
- *   - 进程名：  自动命名为 P1, P2, P3, ...
- * 
- * srand(time(NULL)) 在 main 中已调用，确保每次运行结果不同。
+ * 重置入队标记 - 所有进程标记为"未入队"
+ * 配合调度算法使用，确保每个进程只入队一次
  */
-void random_processes(struct pcb p[], int *count)
-{
-    int num;
+void resetActiveFlags(void) {
     int i;
-
-    printf("how many processes to generate (1-%d): ", N);
-    scanf("%d", &num);
-
-    if (num < 1 || num > N)              // 检查数量是否合法
-    {
-        printf("invalid number, must be 1-%d\n", N);
-        return;
-    }
-
-    for (i = 0; i < num; i++)
-    {
-        sprintf(p[i].id, "P%d", i + 1);           // 自动命名：P1, P2, P3...
-        p[i].arrive   = rand() % 11;              // 到达时间：0 ~ 10
-        p[i].burst    = rand() % 8 + 1;           // 运行时间：1 ~ 8
-        p[i].priority = rand() % 5 + 1;           // 优先级：  1 ~ 5
-    }
-
-    *count = num;                                  // 更新进程总数
-    printf("generated %d random processes\n", num);
-    print_process_list(p, *count);                 // 显示生成结果
+    for (i = 0; i < MAX_PROC; i++) activeFlag[i] = 0;
 }
 
 /*
- * FCFS 调度算法（First Come First Served，先来先服务）
- * 
- * 核心思想：谁先到达，谁先运行。就像排队买东西一样，先到的人先被服务。
- * 这是一个"非抢占式"算法，意味着一个进程一旦开始运行，就会一直运行到结束，
- * 中间不会被其他进程打断。
- * 
- * 参数说明：
- *   p[]     - 原始进程数组（不会被修改）
- *   count   - 进程总数
+ * 链表尾插法 - 把节点加到队列末尾（FIFO先入先出）
+ * qh: 队列头指针, qt: 队列尾指针, node: 要插入的节点
+ * 用于 FCFS、RR、MFQ 的就绪队列
  */
-void fcfs_run(struct pcb p[], int count)
-{
-    // ---- 第一步：准备工作 ----
-    struct pcb jobs[N];            // 存放进程副本，避免修改原始数据
-    int ready_index[10];           // 就绪队列：存放"已到达、等待运行"的进程在 jobs 中的下标
-    int ready_count = 0;           // 就绪队列中当前有多少个进程
-    int current_time = 0;          // 当前时间（模拟 CPU 时钟，从 0 开始）
-    int index = 0;                 // 指向"下一个将要到达"的进程（因为 jobs 已按到达时间排序）
-    int done = 0;                  // 已经完成运行的进程数量
-    char order[MAX_ORDER][10];     // 记录执行顺序（哪个进程先运行、哪个后运行）
-    int order_count = 0;           // 执行顺序数组中的条目数
-    int i;
-
-    // 复制一份进程数据，这样不会影响原始数据
-    copy_processes(p, jobs, count);
-    // 按照到达时间从小到大排序，方便后续按顺序处理
-    sort_by_arrive(jobs, count);
-
-    // ---- 第二步：主循环，一个一个地执行进程 ----
-    while (done < count)  // 当还有进程没完成时，继续循环
-    {
-        // 2.1 把"当前时间之前已经到达"的进程加入就绪队列
-        //     例如：current_time=3，那么到达时间<=3的进程都该进入就绪队列
-        while (index < count && jobs[index].arrive <= current_time)
-        {
-            ready_index[ready_count] = index;  // 把进程的下标放入就绪队列
-            ready_count++;                      // 就绪队列长度 +1
-            index++;                            // 继续检查下一个进程
-        }
-
-        // 2.2 如果就绪队列为空，说明 CPU 空闲，没有进程可运行
-        //     这时把时间快进到下一个进程的到达时间
-        if (ready_count == 0)
-        {
-            current_time = jobs[index].arrive;  // 跳到下一个进程到达的时刻
-            continue;                            // 重新循环，把新到达的进程加入就绪队列
-        }
-
-        // 2.3 FCFS 的核心：选择就绪队列中"第一个"进程（即最早到达的）
-        //     ready_index[0] 就是最早进入队列的进程
-        int choose = ready_index[0];
-
-        // 2.4 把选中的进程从就绪队列中移除（队列头部出队）
-        //     后面的元素依次向前移动一位
-        for (i = 0; i < ready_count - 1; i++)
-        {
-            ready_index[i] = ready_index[i + 1];
-        }
-        ready_count--;  // 队列长度 -1
-
-        // 2.5 记录进程的"开始运行时间"（只记录第一次开始运行的时间）
-        if (jobs[choose].start < 0)  // start 初始为 -1，<0 说明还没开始过
-        {
-            jobs[choose].start = current_time;
-        }
-
-        // 2.6 记录执行顺序
-        strcpy(order[order_count], jobs[choose].id);
-        order_count++;
-
-        // 2.7 FCFS 是非抢占式：进程一旦运行，就会一直运行到结束
-        //     所以直接把当前时间加上该进程的剩余运行时间
-        current_time += jobs[choose].remain;
-        jobs[choose].finish = current_time;   // 记录完成时间
-        jobs[choose].remain = 0;              // 剩余运行时间归零（进程已完成）
-        done++;                                // 完成进程数 +1
+void pushBack(struct PCB **qh, struct PCB **qt, struct PCB *node) {
+    node->next = NULL;               // 新节点作为最后一个，没有后继
+    if (*qt == NULL) {               // 如果队列为空，头尾都指向新节点
+        *qh = node; *qt = node;
+    } else {                         // 队列非空，接在尾部
+        (*qt)->next = node;
+        *qt = node;                  // 更新尾指针
     }
-
-    // ---- 第三步：输出结果 ----
-    print_result("FCFS", jobs, count, order, order_count);
 }
 
 /*
- * HRRN 调度算法（Highest Response Ratio Next，高响应比优先）
- * 
- * 核心思想：每次选择"响应比"最高的进程来运行。
- * 响应比 = (等待时间 + 运行时间) / 运行时间 = 1 + 等待时间/运行时间
- * 
- * 这个算法兼顾了公平和效率：
- *   - 等待越久的进程，响应比越大，越容易被选中（避免饥饿）
- *   - 运行时间短的进程，响应比增长快，也容易被选中（提高效率）
- * 
- * 也是非抢占式：选中后运行到结束。
+ * 按优先权插入 - 数值越大优先级越低
+ * 用于静态优先权调度的就绪队列，高优先权（数值小）的排前面
  */
-void hrrn_run(struct pcb p[], int count)
-{
-    struct pcb jobs[N];
-    int ready_index[10];           // 就绪队列
-    int ready_count = 0;
-    int current_time = 0;
-    int index = 0;
-    int done = 0;
-    char order[MAX_ORDER][10];
-    int order_count = 0;
+void pushPriority(struct PCB **qh, struct PCB **qt, struct PCB *node) {
+    struct PCB *cur = *qh, *prev = NULL;
+    // 找到第一个优先权比新节点低的（数值大），插入它前面
+    while (cur != NULL && cur->priority > node->priority) {
+        prev = cur;
+        cur = cur->next;
+    }
+    node->next = cur;                // 插入到 cur 前面
+    if (prev == NULL) *qh = node;   // 插入到队头
+    else prev->next = node;          // 插入到中间
+    if (cur == NULL) *qt = node;    // 插入到队尾，更新尾指针
+}
+
+/*
+ * 链表头出队 - 取出队列第一个节点
+ * 返回取出节点的指针，同时更新队列头
+ */
+struct PCB *popFront(struct PCB **qh, struct PCB **qt) {
+    struct PCB *node = *qh;          // 取出队头节点
+    if (node == NULL) return NULL;   // 队列为空
+    *qh = node->next;                // 头指针移到下一个
+    if (*qh == NULL) *qt = NULL;    // 如果队列空了，尾指针也置空
+    node->next = NULL;               // 断开节点和队列的连接
+    return node;
+}
+
+/*
+ * 检查当前时刻已到达但未入队的进程，加入FIFO就绪队列
+ * 每次时钟推进后都要调用，把新到达的进程入队
+ */
+void checkAndEnqueue(struct PCB **qh, struct PCB **qt) {
     int i;
-
-    copy_processes(p, jobs, count);
-    sort_by_arrive(jobs, count);
-
-    while (done < count)
-    {
-        // 把已到达的进程加入就绪队列
-        while (index < count && jobs[index].arrive <= current_time)
-        {
-            jobs[index].wait = 0;              // 初始化等待时间为 0
-            ready_index[ready_count] = index;
-            ready_count++;
-            index++;
+    for (i = 0; i < backupCount; i++) {
+        // 如果进程还没入队，且到达时间 <= 当前时间，说明已经到达了
+        if (activeFlag[i] == 0 && backupArray[i].arriveTime <= currentTime) {
+            struct PCB *node = (struct PCB *)malloc(sizeof(struct PCB));
+            // 从备份数组复制一份到链表节点
+            strcpy(node->name, backupArray[i].name);
+            node->arriveTime = backupArray[i].arriveTime;
+            node->burstTime = backupArray[i].burstTime;
+            node->remainTime = backupArray[i].remainTime;
+            node->priority = backupArray[i].priority;
+            node->startTime = backupArray[i].startTime;
+            node->finishTime = backupArray[i].finishTime;
+            node->turnaroundTime = backupArray[i].turnaroundTime;
+            node->weightedTaTime = backupArray[i].weightedTaTime;
+            node->next = NULL;
+            pushBack(qh, qt, node);       // 加入队尾
+            activeFlag[i] = 1;            // 标记为已入队，避免重复入队
         }
+    }
+}
 
-        // CPU 空闲，快进时间
-        if (ready_count == 0)
-        {
-            current_time = jobs[index].arrive;
+/*
+ * 检查当前时刻已到达但未入队的进程，按优先级加入就绪队列
+ * 用于静态优先权调度，每次时钟推进后调用
+ */
+void checkAndEnqueuePriority(struct PCB **qh, struct PCB **qt) {
+    int i;
+    for (i = 0; i < backupCount; i++) {
+        // 检查：未入队 且 已到达
+        if (activeFlag[i] == 0 && backupArray[i].arriveTime <= currentTime) {
+            struct PCB *node = (struct PCB *)malloc(sizeof(struct PCB));  // 分配新节点
+            if (node == NULL) { printf("内存分配失败！\n"); exit(1); }
+            // 从备份数组复制数据到链表节点
+            strcpy(node->name, backupArray[i].name);
+            node->arriveTime = backupArray[i].arriveTime;
+            node->burstTime = backupArray[i].burstTime;
+            node->remainTime = backupArray[i].remainTime;
+            node->priority = backupArray[i].priority;
+            node->startTime = backupArray[i].startTime;
+            node->finishTime = backupArray[i].finishTime;
+            node->turnaroundTime = backupArray[i].turnaroundTime;
+            node->weightedTaTime = backupArray[i].weightedTaTime;
+            node->next = NULL;
+            pushPriority(qh, qt, node);   // 按优先级插入
+            activeFlag[i] = 1;            // 标记为已入队
+        }
+    }
+}
+
+/*
+ * 找到所有未到达进程中最早的到达时间
+ * 当就绪队列为空时，系统会直接跳到这个时间，跳过CPU空闲时间
+ */
+int findNextArrivalTime(void) {
+    int i, nextTime = -1;              // -1 表示还没有找到
+    for (i = 0; i < backupCount; i++) {
+        if (activeFlag[i] == 0) {      // 只检查还没入队的进程
+            // 找最小的到达时间
+            if (nextTime < 0 || backupArray[i].arriveTime < nextTime)
+                nextTime = backupArray[i].arriveTime;
+        }
+    }
+    return nextTime;                   // 返回最早到达时间，-1表示所有进程都已入队
+}
+
+/*
+ * 将链表节点中的调度结果复制回备份数组
+ * 因为我们用链表节点做调度，结果要写回备份才能打印输出
+ */
+void copyResultToBackup(struct PCB *node) {
+    int i;
+    // 遍历备份数组，找到对应名称的进程
+    for (i = 0; i < backupCount; i++) {
+        if (strcmp(backupArray[i].name, node->name) == 0) {
+            // 把调度结果写回备份数组，方便后续打印
+            backupArray[i].startTime = node->startTime;
+            backupArray[i].finishTime = node->finishTime;
+            backupArray[i].turnaroundTime = node->turnaroundTime;
+            backupArray[i].weightedTaTime = node->weightedTaTime;
+            backupArray[i].remainTime = 0;     // 已完成，剩余时间为0
+            break;                              // 找到了就退出循环
+        }
+    }
+}
+
+/*
+ * 释放链表所有节点内存 - 避免内存泄漏
+ * 调度完成后调用，释放链表节点
+ */
+void freeList(struct PCB *head) {
+    struct PCB *cur = head;
+    while (cur != NULL) {
+        struct PCB *next = cur->next;
+        free(cur);      // 释放每个节点
+        cur = next;
+    }
+}
+
+/*
+ * 打印调度结果表格 - 格式化输出所有进程信息和统计结果
+ */
+void printResultTable(const char *name) {
+    int i;
+    float sumT = 0.0f, sumW = 0.0f;       // sumT: 总周转时间, sumW: 总带权周转时间
+    printf("\n===== %s 调度结果 =====\n", name);
+    // 打印表头，%-10s表示左对齐宽度10
+    printf("%-10s %-8s %-6s %-8s %-8s %-10s %-8s %-8s\n",
+           "进程","到达","运行","开始","完成","周转","带权周转","优先权");
+    // 逐行打印每个进程的调度结果
+    for (i = 0; i < backupCount; i++) {
+        printf("%-10s %-8d %-6d %-8d %-8d %-10d %-8.2f %-8d\n",
+               backupArray[i].name,         // 进程名称
+               backupArray[i].arriveTime,   // 到达时间
+               backupArray[i].burstTime,    // 运行时间
+               backupArray[i].startTime,    // 开始时间
+               backupArray[i].finishTime,   // 完成时间
+               backupArray[i].turnaroundTime,   // 周转时间
+               backupArray[i].weightedTaTime,   // 带权周转时间（保留两位小数）
+               backupArray[i].priority);        // 优先权
+        sumT += backupArray[i].turnaroundTime;  // 累加周转时间
+        sumW += backupArray[i].weightedTaTime;  // 累加带权周转时间
+    }
+    // 打印统计结果（平均值）
+    if (backupCount > 0) {
+        printf("\n平均周转时间: %.2f\n", sumT / backupCount);
+        printf("平均带权周转时间: %.2f\n", sumW / backupCount);
+    }
+}
+
+/*
+ * FCFS 先来先服务调度算法
+ * 原理：哪个进程先到达，哪个先运行，直到完成
+ * 特点：非抢占式，实现简单，对短进程不友好
+ */
+void fcfs(void) {
+    struct PCB *qh = NULL, *qt = NULL;  // 就绪队列头指针、尾指针
+    int done = 0;                        // 已完成进程数
+    resetProcesses(); resetActiveFlags(); currentTime = 0;  // 初始化
+    while (done < backupCount) {         // 直到所有进程完成
+        checkAndEnqueue(&qh, &qt);       // 将当前已到达的进程全部入队
+        if (qh == NULL) {               // 就绪队列为空，说明还没有进程到达
+            int nt = findNextArrivalTime();
+            if (nt < 0) break;         // 所有进程都完成了
+            currentTime = nt;           // 直接跳到下一个进程到达时间
             continue;
         }
+        struct PCB *node = popFront(&qh, &qt);  // 取出队头第一个进程
+        if (node->startTime < 0) node->startTime = currentTime;  // 记录开始时间
+        currentTime += node->remainTime;  // 进程一直运行直到完成，推进时钟
+        node->finishTime = currentTime;   // 记录完成时间
+        node->remainTime = 0;             // 剩余时间清0
+        // 计算周转时间和带权周转时间
+        node->turnaroundTime = node->finishTime - node->arriveTime;
+        node->weightedTaTime = (node->burstTime > 0) ? (float)node->turnaroundTime / node->burstTime : 0.0f;
+        copyResultToBackup(node);  // 结果写回备份数组
+        done++;  // 已完成计数+1
+        free(node);  // 释放链表节点
+    }
+    freeList(qh);  // 释放队列中剩余节点
+    printResultTable("FCFS");  // 打印结果
+}
 
-        // ★ HRRN 的核心：遍历就绪队列，计算每个进程的响应比，选最大的
-        int choose = 0;
-        float best_ratio = -1.0;               // 当前最高响应比（初始 -1，保证第一个就会更新）
-        for (i = 0; i < ready_count; i++)
-        {
-            int pos = ready_index[i];
-            // 计算等待时间 = 当前时间 - 到达时间
-            jobs[pos].wait = current_time - jobs[pos].arrive;
-            if (jobs[pos].wait < 0)            // 保险：等待时间不能为负
-            {
-                jobs[pos].wait = 0;
-            }
-            // 响应比 = (等待时间 + 剩余运行时间) / 剩余运行时间
-            // 例如：等了3个单位，还要跑2个单位 → 响应比 = (3+2)/2 = 2.5
-            float ratio = (float)(jobs[pos].wait + jobs[pos].remain) / jobs[pos].remain;
-            if (ratio > best_ratio)            // 找到更大的响应比就更新
-            {
-                best_ratio = ratio;
-                choose = pos;                  // 记住这个进程在 jobs 中的下标
-            }
+/*
+ * 静态优先权调度算法
+ * 原理：每个进程优先权固定，每次选优先权最高的运行，直到完成
+ * 特点：非抢占式，优先权高的先运行，优先权是静态确定的
+ */
+void priority(void) {
+    struct PCB *qh = NULL, *qt = NULL;  // 就绪队列（按优先权排序）
+    int done = 0;
+    resetProcesses(); resetActiveFlags(); currentTime = 0;
+    while (done < backupCount) {
+        checkAndEnqueuePriority(&qh, &qt);  // 按优先级插入队列
+        if (qh == NULL) {
+            int nt = findNextArrivalTime();
+            if (nt < 0) break;
+            currentTime = nt;
+            continue;
         }
-
-        // 从就绪队列中移除选中的进程（因为它在队列中间，需要找到位置再移除）
-        for (i = 0; i < ready_count; i++)
-        {
-            if (ready_index[i] == choose)
-            {
-                int j;
-                for (j = i; j < ready_count - 1; j++)
-                {
-                    ready_index[j] = ready_index[j + 1];  // 后面的元素前移
-                }
-                ready_count--;
-                break;
-            }
-        }
-
-        // 记录开始时间
-        if (jobs[choose].start < 0)
-        {
-            jobs[choose].start = current_time;
-        }
-        strcpy(order[order_count], jobs[choose].id);
-        order_count++;
-
-        // 非抢占：一次性运行到结束
-        current_time += jobs[choose].remain;
-        jobs[choose].finish = current_time;
-        jobs[choose].remain = 0;
+        struct PCB *node = popFront(&qh, &qt);  // 取出队头（就是优先权最高的）
+        if (node->startTime < 0) node->startTime = currentTime;
+        currentTime += node->remainTime;  // 一直运行到完成
+        node->finishTime = currentTime;
+        node->remainTime = 0;
+        node->turnaroundTime = node->finishTime - node->arriveTime;
+        node->weightedTaTime = (node->burstTime > 0) ? (float)node->turnaroundTime / node->burstTime : 0.0f;
+        copyResultToBackup(node);
         done++;
+        free(node);
     }
-
-    print_result("HRRN", jobs, count, order, order_count);
+    freeList(qh);
+    printResultTable("Static Priority");
 }
 
 /*
- * RR 调度算法（Round Robin，时间片轮转）
- * 
- * 核心思想：每个进程轮流运行一小段时间（时间片），用完时间片后如果还没完成，
- * 就排到队尾等待下一轮。就像几个人轮流用一台电脑，每人只能用固定时间。
- * 这是一个"抢占式"算法，进程运行时间片用完后会被强制切换。
- * 
- * 与 FCFS 的关键区别：
- *   - FCFS：一个进程运行到结束才切换（非抢占）
- *   - RR：每个进程最多运行 time_slice 时长，时间到了就换下一个（抢占）
- * 
- * 参数说明：
- *   p[]     - 原始进程数组（不会被修改）
- *   count   - 进程总数
+ * RR 时间片轮转调度算法
+ * 原理：每个进程轮流运行一个时间片，时间片用完就回到队尾
+ * 特点：抢占式，每个进程公平分配CPU时间，响应快
  */
-void rr_run(struct pcb p[], int count)
-{
-    // ---- 第一步：准备工作 ----
-    struct pcb jobs[N];            // 存放进程副本，避免修改原始数据
-    int ready_index[10];           // 就绪队列：存放"已到达、等待运行"的进程在 jobs 中的下标
-    int ready_count = 0;           // 就绪队列中当前有多少个进程
-    int current_time = 0;          // 当前时间（模拟 CPU 时钟，从 0 开始）
-    int index = 0;                 // 指向"下一个将要到达"的进程（因为 jobs 已按到达时间排序）
-    int done = 0;                  // 已经完成运行的进程数量
-    char order[MAX_ORDER][10];     // 记录执行顺序（哪个进程先运行、哪个后运行）
-    int order_count = 0;           // 执行顺序数组中的条目数
-    int i;
-    int time_slice = 2;            // 时间片大小 = 2 个单位时间（每个进程每次最多运行 2）
-
-    // 复制一份进程数据，这样不会影响原始数据
-    copy_processes(p, jobs, count);
-    // 按照到达时间从小到大排序，方便后续按顺序处理
-    sort_by_arrive(jobs, count);
-
-    // ---- 第二步：主循环，轮转执行进程 ----
-    while (done < count)  // 当还有进程没完成时，继续循环
-    {
-        // 2.1 把"当前时间之前已经到达"的进程加入就绪队列
-        while (index < count && jobs[index].arrive <= current_time)
-        {
-            ready_index[ready_count] = index;  // 把进程的下标放入就绪队列
-            ready_count++;                      // 就绪队列长度 +1
-            index++;                            // 继续检查下一个进程
-        }
-
-        // 2.2 如果就绪队列为空，说明 CPU 空闲，没有进程可运行
-        //     这时把时间快进到下一个进程的到达时间
-        if (ready_count == 0)
-        {
-            current_time = jobs[index].arrive;  // 跳到下一个进程到达的时刻
-            continue;                            // 重新循环，把新到达的进程加入就绪队列
-        }
-
-        // 2.3 从就绪队列头部取出一个进程来运行（先进先出）
-        int choose = ready_index[0];
-
-        // 2.4 把这个进程从就绪队列中移除（头部出队）
-        for (i = 0; i < ready_count - 1; i++)
-        {
-            ready_index[i] = ready_index[i + 1];
-        }
-        ready_count--;
-
-        // 2.5 记录进程的"开始运行时间"（只记录第一次开始运行的时间）
-        if (jobs[choose].start < 0)  // start 初始为 -1，<0 说明还没开始过
-        {
-            jobs[choose].start = current_time;
-        }
-
-        // 2.6 记录执行顺序（同一个进程可能被记录多次，因为它可能被多次调度）
-        strcpy(order[order_count], jobs[choose].id);
-        order_count++;
-
-        // 2.7 RR 的核心：计算本次实际运行时间
-        //     实际运行时间 = min(时间片, 剩余运行时间)
-        //     例如：时间片=2，剩余=5 → 本次运行2，剩3
-        //           时间片=2，剩余=1 → 本次运行1，剩0（进程完成）
-        int run_time = time_slice;               // 先假设运行一个完整的时间片
-        if (run_time > jobs[choose].remain)      // 如果时间片比剩余时间还大
-        {
-            run_time = jobs[choose].remain;      // 就只运行剩余的时间（避免运行过头）
-        }
-
-        // 2.8 更新当前时间和进程的剩余运行时间
-        current_time += run_time;                // 时间前进 run_time
-        jobs[choose].remain -= run_time;         // 进程剩余运行时间减少 run_time
-
-        // 2.9 在运行过程中，可能有新进程到达，把它们加入就绪队列
-        while (index < count && jobs[index].arrive <= current_time)
-        {
-            ready_index[ready_count] = index;
-            ready_count++;
-            index++;
-        }
-
-        // 2.10 判断该进程是否已经完成
-        if (jobs[choose].remain == 0)            // 剩余时间为 0，进程完成了
-        {
-            jobs[choose].finish = current_time;  // 记录完成时间
-            done++;                               // 完成进程数 +1
-        }
-        else                                     // 还没完成，放回就绪队列尾部
-        {
-            // ★ 这是 RR 与 FCFS 最大的不同：没完成的进程重新排队
-            ready_index[ready_count] = choose;   // 把进程下标放回队尾
-            ready_count++;                        // 队列长度 +1
-        }
-    }
-
-    // ---- 第三步：输出结果 ----
-    print_result("RR", jobs, count, order, order_count);
-}
-
-/*
- * MLFQ 调度算法（Multi-Level Feedback Queue，多级反馈队列）
- * 
- * 这是最复杂的调度算法，也是现代操作系统实际使用的算法。
- * 
- * 核心思想：设置 3 个优先级不同的队列（Q0 > Q1 > Q2），
- * 进程在不同队列中享受不同的时间片，用完时间片就降级到下一级队列。
- * 
- * 队列设计：
- *   队列0（最高优先级）：时间片 = 1，新进程都先进入这里
- *   队列1（中优先级）  ：时间片 = 2
- *   队列2（最低优先级）：时间片 = 4，用完后如果还没完成，继续留在队列2
- * 
- * 调度规则：
- *   1. 总是优先运行高优先级队列中的进程
- *   2. 只有高优先级队列为空时，才运行低优先级队列
- *   3. 进程在队列0用完时间片→降级到队列1→再降级到队列2
- * 
- * 优点：短进程很快完成（在高优先级），长进程也不会饿死（在低优先级用大时间片）
- */
-void multi_level_run(struct pcb p[], int count)
-{
-    struct pcb jobs[N];
-    // ★ 三个独立的就绪队列，分别对应三个优先级
-    int queue0[10];          // 最高优先级队列（时间片=1）
-    int queue1[10];          // 中优先级队列（时间片=2）
-    int queue2[10];          // 最低优先级队列（时间片=4）
-    int count0 = 0;          // 队列0 中的进程数
-    int count1 = 0;          // 队列1 中的进程数
-    int count2 = 0;          // 队列2 中的进程数
-    int current_time = 0;
-    int index = 0;
-    int done = 0;
-    char order[MAX_ORDER][10];
-    int order_count = 0;
-    int i;
-    int level;               // 当前选中的进程来自哪个队列
-
-    copy_processes(p, jobs, count);
-    sort_by_arrive(jobs, count);
-
-    while (done < count)
-    {
-        // 新到达的进程始终进入最高优先级队列（queue0）
-        while (index < count && jobs[index].arrive <= current_time)
-        {
-            queue0[count0] = index;
-            count0++;
-            index++;
-        }
-
-        // 三个队列全空 → CPU 空闲，快进时间
-        if (count0 == 0 && count1 == 0 && count2 == 0)
-        {
-            current_time = jobs[index].arrive;
+void rr(void) {
+    struct PCB *qh = NULL, *qt = NULL;
+    int done = 0, ts;
+    printf("请输入 RR 时间片大小: ");
+    scanf("%d", &ts);
+    if (ts <= 0) ts = 1;                // 时间片至少为1
+    resetProcesses(); resetActiveFlags(); currentTime = 0;
+    while (done < backupCount) {
+        checkAndEnqueue(&qh, &qt);       // 先检查新到达的进程
+        if (qh == NULL) {
+            int nt = findNextArrivalTime();
+            if (nt < 0) break;
+            currentTime = nt;
             continue;
         }
-
-        // ★ MLFQ 的核心选择逻辑：优先级 queue0 > queue1 > queue2
-        int choose = -1;
-        if (count0 > 0)                              // 优先检查队列0
-        {
-            choose = queue0[0];                      // 取队头
-            for (i = 0; i < count0 - 1; i++)         // 队头出队（前移）
-            {
-                queue0[i] = queue0[i + 1];
-            }
-            count0--;
-            level = 0;                               // 标记来自队列0
-        }
-        else if (count1 > 0)                         // 队列0为空，检查队列1
-        {
-            choose = queue1[0];
-            for (i = 0; i < count1 - 1; i++)
-            {
-                queue1[i] = queue1[i + 1];
-            }
-            count1--;
-            level = 1;                               // 标记来自队列1
-        }
-        else                                         // 队列0和1都空，用队列2
-        {
-            choose = queue2[0];
-            for (i = 0; i < count2 - 1; i++)
-            {
-                queue2[i] = queue2[i + 1];
-            }
-            count2--;
-            level = 2;                               // 标记来自队列2
-        }
-
-        if (jobs[choose].start < 0)
-        {
-            jobs[choose].start = current_time;
-        }
-        strcpy(order[order_count], jobs[choose].id);
-        order_count++;
-
-        // 根据进程所在的队列级别，分配不同的时间片
-        int run_time = 1;                            // 队列0：时间片=1
-        if (level == 1)
-        {
-            run_time = 2;                            // 队列1：时间片=2
-        }
-        if (level == 2)
-        {
-            run_time = 4;                            // 队列2：时间片=4
-        }
-        if (run_time > jobs[choose].remain)          // 实际运行时间不超过剩余时间
-        {
-            run_time = jobs[choose].remain;
-        }
-
-        current_time += run_time;
-        jobs[choose].remain -= run_time;
-
-        // 运行期间新到达的进程进入队列0
-        while (index < count && jobs[index].arrive <= current_time)
-        {
-            queue0[count0] = index;
-            count0++;
-            index++;
-        }
-
-        // 判断进程是否完成
-        if (jobs[choose].remain == 0)
-        {
-            jobs[choose].finish = current_time;
+        struct PCB *node = popFront(&qh, &qt);  // 取队头
+        if (node->startTime < 0) node->startTime = currentTime;
+        if (node->remainTime > ts) {     // 剩余时间 > 时间片，不能一次运行完
+            currentTime += ts;           // 运行一个时间片
+            node->remainTime -= ts;      // 减少剩余时间
+            checkAndEnqueue(&qh, &qt);   // 运行期间可能有新进程到达
+            pushBack(&qh, &qt, node);    // 未完成，放回队尾等待下次
+        } else {                         // 剩余时间 <= 时间片，可以一次运行完
+            currentTime += node->remainTime;
+            node->finishTime = currentTime;
+            node->remainTime = 0;
+            node->turnaroundTime = node->finishTime - node->arriveTime;
+            node->weightedTaTime = (node->burstTime > 0) ? (float)node->turnaroundTime / node->burstTime : 0.0f;
+            copyResultToBackup(node);
             done++;
-        }
-        else if (level == 0)                         // 队列0没跑完 → 降级到队列1
-        {
-            queue1[count1] = choose;
-            count1++;
-        }
-        else if (level == 1)                         // 队列1没跑完 → 降级到队列2
-        {
-            queue2[count2] = choose;
-            count2++;
-        }
-        else                                         // 队列2没跑完 → 继续留在队列2
-        {
-            queue2[count2] = choose;
-            count2++;
+            free(node);
         }
     }
-
-    print_result("MLFQ", jobs, count, order, order_count);
+    freeList(qh);
+    printResultTable("RR");
 }
 
 /*
- * 主函数：程序入口，显示菜单并响应用户选择
- * 
- * 程序流程：
- *   1. 从文件加载进程数据（或初始化默认数据）
- *   2. 循环显示菜单，等待用户选择
- *   3. 根据选择执行对应的调度算法或操作
- *   4. 选择"8"保存数据并退出
+ * MFQ 多级反馈队列调度算法
+ * 原理：有3个级别的队列，每个队列时间片不同（1, 2, 4）
+ *       新进程先进入最高级队列，用完时间片就降级
+ *       高级队列优先调度，但每个队列时间片更短
+ * 特点：综合了短作业优先和时间片轮转的优点
  */
-int main(void)
-{
-    struct pcb process_list[N];            // 进程数组，最多 N 个进程
-    int count;                              // 当前进程数量
-    int choice;                             // 用户菜单选择
-
-    count = load_data(process_list);        // 启动时加载进程数据
-    srand((unsigned int)time(NULL));         // 初始化随机数种子（每次运行产生不同随机数）
-
-    while (1)                               // 无限循环，直到用户选择退出
-    {
-        printf("\n===== process scheduling system =====\n");
-        printf("1. show process list\n");   // 查看当前所有进程
-        printf("2. FCFS\n");               // 先来先服务调度
-        printf("3. HRRN\n");               // 高响应比优先调度
-        printf("4. RR\n");                 // 时间片轮转调度
-        printf("5. MLFQ\n");               // 多级反馈队列调度
-        printf("6. add process\n");        // 手动添加进程
-        printf("7. random generate\n");    // 随机生成进程
-        printf("8. save and exit\n");      // 保存并退出
-        printf("choose: ");
-        scanf("%d", &choice);
-
-        if (choice == 1)
-        {
-            print_process_list(process_list, count);   // 显示进程列表
+void mfq(void) {
+    struct PCB *qh[3] = {NULL,NULL,NULL};  // 三级队列，每级一个头指针
+    struct PCB *qt[3] = {NULL,NULL,NULL};  // 三级队列，每级一个尾指针
+    int ts[3] = {1,2,4};                  // 三级队列的时间片：1, 2, 4
+    int done = 0, lv;                     // done: 完成数, lv: 当前调度的队列级别
+    resetProcesses(); resetActiveFlags(); currentTime = 0;
+    while (done < backupCount) {
+        checkAndEnqueue(&qh[0], &qt[0]);  // 新进程先进入最高级队列（级别0）
+        // 从高到低查找有进程的队列
+        lv = -1;
+        if (qh[0] != NULL) lv = 0;
+        else if (qh[1] != NULL) lv = 1;
+        else if (qh[2] != NULL) lv = 2;
+        if (lv < 0) {                      // 所有队列都为空
+            int nt = findNextArrivalTime();
+            if (nt < 0) break;
+            currentTime = nt;
+            continue;
         }
-        else if (choice == 2)
-        {
-            reset_processes(process_list, count);       // 重置状态（每次调度前必须重置）
-            fcfs_run(process_list, count);              // 运行 FCFS 调度
-        }
-        else if (choice == 3)
-        {
-            reset_processes(process_list, count);
-            hrrn_run(process_list, count);              // 运行 HRRN 调度
-        }
-        else if (choice == 4)
-        {
-            reset_processes(process_list, count);
-            rr_run(process_list, count);                // 运行 RR 调度
-        }
-        else if (choice == 5)
-        {
-            reset_processes(process_list, count);
-            multi_level_run(process_list, count);       // 运行 MLFQ 调度
-        }
-        else if (choice == 6)
-        {
-            add_process(process_list, &count);          // 添加进程（注意 &count 传地址）
-            save_data(process_list, count);             // 添加后自动保存
-        }
-        else if (choice == 7)
-        {
-            random_processes(process_list, &count);     // 随机生成进程
-            save_data(process_list, count);             // 保存到文件
-        }
-        else if (choice == 8)
-        {
-            save_data(process_list, count);             // 退出前保存数据
-            break;                                      // 跳出 while 循环，程序结束
-        }
-        else
-        {
-            printf("wrong choice\n");                   // 输入了无效选项
+        struct PCB *node = popFront(&qh[lv], &qt[lv]);  // 从当前级别队列取队头
+        if (node->startTime < 0) node->startTime = currentTime;
+        if (node->remainTime > ts[lv]) {   // 当前时间片不够完成
+            currentTime += ts[lv];          // 运行一个时间片
+            node->remainTime -= ts[lv];
+            checkAndEnqueue(&qh[0], &qt[0]);  // 期间可能有新进程到达
+            if (lv < 2)                    // 没有到最低级，降到下一级
+                pushBack(&qh[lv+1], &qt[lv+1], node);
+            else                           // 已经是最低级，保持在最低级
+                pushBack(&qh[2], &qt[2], node);
+        } else {                           // 当前时间片足够完成
+            currentTime += node->remainTime;
+            node->finishTime = currentTime;
+            node->remainTime = 0;
+            node->turnaroundTime = node->finishTime - node->arriveTime;
+            node->weightedTaTime = (node->burstTime > 0) ? (float)node->turnaroundTime / node->burstTime : 0.0f;
+            copyResultToBackup(node);
+            done++;
+            free(node);
         }
     }
+    freeList(qh[0]); freeList(qh[1]); freeList(qh[2]);  // 释放三级队列
+    printResultTable("MFQ");
+}
 
+/*
+ * 主函数 - 程序入口
+ * 显示菜单，根据用户选择调用不同的调度算法
+ */
+int main(void) {
+    int choice;
+    system("chcp 65001 >nul");          // 设置控制台为UTF-8编码，解决中文乱码
+    initSystem();                        // 初始化系统
+    if (!load_data()) {                  // 尝试从文件加载进程数据
+        printf("无法加载 processes.txt，使用默认的 5 个进程\n");
+        init_default_processes();        // 加载失败，使用默认进程
+    }
+    while (1) {                          // 主循环，显示菜单直到用户选择退出
+        printf("\n===== 进程调度模拟系统 =====\n");
+        printf("1. 显示进程列表\n");
+        printf("2. FCFS\n");
+        printf("3. Static Priority\n");
+        printf("4. RR\n");
+        printf("5. MFQ\n");
+        printf("6. 添加进程\n");
+        printf("7. 随机生成进程\n");
+        printf("8. 重新输入所有进程\n");
+        printf("9. 保存并退出\n");
+        printf("请选择: ");
+        if (scanf("%d", &choice) != 1) { // 输入不是数字，防止死循环
+            printf("输入无效！\n");
+            while (getchar() != '\n');   // 清空输入缓冲区
+            continue;
+        }
+        if (choice == 1) show_process_list();
+        else if (choice == 2) { if (backupCount<=0) printf("请先输入进程！\n"); else fcfs(); }
+        else if (choice == 3) { if (backupCount<=0) printf("请先输入进程！\n"); else priority(); }
+        else if (choice == 4) { if (backupCount<=0) printf("请先输入进程！\n"); else rr(); }
+        else if (choice == 5) { if (backupCount<=0) printf("请先输入进程！\n"); else mfq(); }
+        else if (choice == 6) add_process();
+        else if (choice == 7) random_generate();
+        else if (choice == 8) inputProcesses();
+        else if (choice == 9) { save_data(); break; }  // 保存数据并退出循环
+        else printf("选择无效！\n");
+    }
     return 0;
 }
